@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Gesture Christmas Tree</title>
+    <!-- 外部依赖 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/three@0.152.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <style>
+        body { margin: 0; background-color: #000; overflow: hidden; color: white; }
+        canvas { display: block; }
+        #video-preview {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 120px;
+            height: 90px;
+            border: 2px solid #D4AF37;
+            border-radius: 10px;
+            transform: scaleX(-1);
+            object-fit: cover;
+            z-index: 20;
+        }
+        .glass-ui {
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(212, 175, 55, 0.3);
+        }
+        #loading-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: black; display: flex; flex-direction: column;
+            justify-content: center; align-items: center; z-index: 100;
+        }
+    </style>
+</head>
+<body>
+
+<!-- 加载动画 -->
+<div id="loading-overlay">
+    <div class="text-gold-500 text-2xl mb-4 animate-pulse" style="color: #D4AF37;">
+        <i class="fas fa-tree mr-2"></i>正在加载圣诞魔法...
+    </div>
+    <p class="text-gray-400 text-sm">请允许摄像头访问以开启手势交互</p>
+</div>
+
+<!-- UI 界面 -->
+<div class="absolute top-0 left-0 w-full p-6 flex flex-col items-center pointer-events-none z-10">
+    <h1 class="text-4xl md:text-6xl font-bold mb-2 tracking-widest" style="color: #D4AF37; text-shadow: 0 0 20px rgba(212,175,55,0.6);">
+        Merry Christmas
+    </h1>
+    <div class="glass-ui p-4 rounded-full pointer-events-auto mt-4 flex gap-4">
+        <button onclick="document.getElementById('fileInput').click()" class="bg-yellow-600 hover:bg-yellow-500 text-white px-6 py-2 rounded-full transition-all flex items-center">
+            <i class="fas fa-image mr-2"></i> 添加照片
+        </button>
+        <input type="file" id="fileInput" accept="image/*" class="hidden" onchange="handleImageUpload(event)">
+    </div>
+    <p class="mt-4 text-xs text-gray-300 opacity-70">手势提示：捏合指尖缩放照片，移动手指控制位置</p>
+</div>
+
+<!-- 摄像头预览 -->
+<video id="video-preview" autoplay playsinline></video>
+
+<script>
+    /** --- 初始化变量 --- **/
+    let scene, camera, renderer, treeParticles, photoMesh;
+    const videoElement = document.getElementById('video-preview');
+    const loadingOverlay = document.getElementById('loading-overlay');
+    
+    let targetPhotoPos = new THREE.Vector3(0, 0, 2);
+    let targetPhotoScale = 1;
+    let isPhotoLoaded = false;
+
+    /** --- Three.js 场景构建 --- **/
+    function initThree() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.z = 5;
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        // 创建圣诞树粒子
+        const particleCount = 6000;
+        const geometry = new THREE.BufferGeometry();
+        const positions = new Float32Array(particleCount * 3);
+        const colors = new Float32Array(particleCount * 3);
+
+        for (let i = 0; i < particleCount; i++) {
+            // 螺旋圆锥算法
+            const y = (Math.random() * 4) - 1.5; 
+            const radius = (2.5 - (y + 1.5)) * 0.6;
+            const angle = y * 8 + (Math.random() * 0.2);
+            
+            positions[i * 3] = Math.cos(angle) * radius * Math.random();
+            positions[i * 3 + 1] = y;
+            positions[i * 3 + 2] = Math.sin(angle) * radius * Math.random();
+
+            // 金色与红色的混合
+            if (Math.random() > 0.3) {
+                colors[i * 3] = 0.83; colors[i * 3 + 1] = 0.68; colors[i * 3 + 2] = 0.21; // Gold
+            } else {
+                colors[i * 3] = 0.8; colors[i * 3 + 1] = 0.1; colors[i * 3 + 2] = 0.1; // Red
+            }
+        }
+
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        const material = new THREE.PointsMaterial({
+            size: 0.03,
+            vertexColors: true,
+            transparent: true,
+            blending: THREE.AdditiveBlending
+        });
+
+        treeParticles = new THREE.Points(geometry, material);
+        scene.add(treeParticles);
+
+        // 初始化照片占位符
+        const photoGeo = new THREE.PlaneGeometry(1.5, 1.5);
+        const photoMat = new THREE.MeshBasicMaterial({ 
+            transparent: true, 
+            opacity: 0,
+            side: THREE.DoubleSide 
+        });
+        photoMesh = new THREE.Mesh(photoGeo, photoMat);
+        scene.add(photoMesh);
+
+        window.addEventListener('resize', onWindowResize);
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    /** --- 照片上传处理 --- **/
+    function handleImageUpload(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const texture = new THREE.TextureLoader().load(e.target.result);
+            photoMesh.material.map = texture;
+            photoMesh.material.opacity = 1;
+            isPhotoLoaded = true;
+            
+            // 调整照片比例
+            const img = new Image();
+            img.src = e.target.result;
+            img.onload = () => {
+                const aspect = img.width / img.height;
+                photoMesh.scale.set(aspect, 1, 1);
+            };
+        };
+        reader.readAsDataURL(file);
+    }
+
+    /** --- MediaPipe 手势识别 --- **/
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+    });
+
+    hands.onResults((results) => {
+        loadingOverlay.style.display = 'none';
+
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const landmarks = results.multiHandLandmarks[0];
+            
+            // 1. 获取食指位置 (Landmark 8) 并映射到 3D 空间
+            const indexFinger = landmarks[8];
+            targetPhotoPos.x = (0.5 - indexFinger.x) * 8; // 镜像处理并放大系数
+            targetPhotoPos.y = (0.5 - indexFinger.y) * 6;
+
+            // 2. 计算捏合距离 (大拇指 4 和 食指 8)
+            const thumb = landmarks[4];
+            const distance = Math.sqrt(
+                Math.pow(thumb.x - indexFinger.x, 2) + 
+                Math.pow(thumb.y - indexFinger.y, 2)
+            );
+
+            // 3. 根据距离设置缩放 (捏合越紧，照片越大)
+            targetPhotoScale = distance < 0.06 ? 2.0 : 1.0;
+        }
+    });
+
+    const cameraHandler = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+    });
+    cameraHandler.start();
+
+    /** --- 动画循环 --- **/
+    function animate() {
+        requestAnimationFrame(animate);
+
+        // 圣诞树自转
+        if (treeParticles) {
+            treeParticles.rotation.y += 0.005;
+        }
+
+        // 照片平滑跟随手势 (Lerp 插值)
+        if (isPhotoLoaded) {
+            photoMesh.position.lerp(targetPhotoPos, 0.1);
+            const s = THREE.MathUtils.lerp(photoMesh.scale.y, targetPhotoScale, 0.1);
+            // 保持比例缩放
+            const aspect = photoMesh.scale.x / photoMesh.scale.y;
+            photoMesh.scale.set(s * aspect, s, 1);
+            
+            // 让照片始终面向摄像机
+            photoMesh.lookAt(camera.position);
+        }
+
+        renderer.render(scene, camera);
+    }
+
+    // 启动
+    initThree();
+    animate();
+</script>
+</body>
+</html>
